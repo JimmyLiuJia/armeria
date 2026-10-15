@@ -101,6 +101,22 @@ class GrpcTimeoutPolicyServerTest {
         }
     };
 
+    @RegisterExtension
+    static ServerExtension delayedServer = new ServerExtension() {
+        @Override
+        protected void configure(ServerBuilder sb) throws Exception {
+            sb.requestTimeoutMillis(5000);
+            sb.service(GrpcService.builder()
+                                  .timeoutPolicy(GrpcTimeoutPolicy.useGrpcTimeoutHeader(MAX))
+                                  .addService(new TimeoutReportingService())
+                                  .build());
+            sb.decorator((delegate, ctx, req) -> {
+                Thread.sleep(400);
+                return delegate.serve(ctx, req);
+            });
+        }
+    };
+
     @Test
     void longClientTimeoutIsCapped() {
         final TestServiceBlockingStub client =
@@ -115,6 +131,15 @@ class GrpcTimeoutPolicyServerTest {
                 GrpcClients.newClient(server.httpUri(), TestServiceBlockingStub.class);
         assertTimeoutIsAbout(requestTimeoutMillis(client.withDeadlineAfter(500, TimeUnit.MILLISECONDS)),
                              500);
+    }
+
+    @Test
+    void clientTimeoutStartsWhenRequestArrives() {
+        final TestServiceBlockingStub client = GrpcClients.builder(delayedServer.httpUri())
+                                                          .responseTimeoutMillis(0)
+                                                          .setHeader(GrpcHeaderNames.GRPC_TIMEOUT, "2000m")
+                                                          .build(TestServiceBlockingStub.class);
+        assertThat(requestTimeoutMillis(client)).isBetween(1900L, 2100L);
     }
 
     @Test
@@ -196,9 +221,8 @@ class GrpcTimeoutPolicyServerTest {
     /**
      * Asserts that the specified {@code actualMillis} is the {@code expectedMillis} the policy decided, give or
      * take a second, because a timeout does not survive a round trip to the millisecond. A client subtracts
-     * what its deadline already spent before writing the {@code grpc-timeout} header, and a server sets the
-     * timeout from the moment the service is reached while
-     * {@link ServiceRequestContext#requestTimeoutMillis()} reports it relative to the start of the request.
+     * what its deadline already spent before writing the {@code grpc-timeout} header, and the server sets the
+     * timeout relative to the start of the request.
      */
     private static void assertTimeoutIsAbout(long actualMillis, long expectedMillis) {
         assertThat(actualMillis).isBetween(expectedMillis - 1000, expectedMillis + 1000);
